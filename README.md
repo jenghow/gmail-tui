@@ -12,7 +12,8 @@ password**. There is no browser, no OAuth dance, and no server in the middle.
 - Three-pane layout: mailboxes, message list, and reading pane
 - Unread counts per folder, with Gmail's folders (Inbox, Starred, Sent, …) ordered first
 - Plain-text reading pane; `text/html` messages are reduced to text automatically
-- Compose and send messages (Gmail files them into **Sent** for you)
+- Colour-coded header keys (From / To / Cc / Bcc / Subject) in the reading pane and composer
+- Compose and send messages, with Cc and Bcc (Gmail files them into **Sent** for you)
 - Mark messages read / unread
 - Search within the current folder via IMAP `SEARCH`
 - Remembers your address and credential backend between runs
@@ -36,6 +37,23 @@ cargo build --release
 
 The binary is written to `target/release/gmail-tui`. Copy it somewhere on your `PATH`, or
 run it in place with `cargo run --release --`.
+
+### Packaging a release
+
+To build a distributable zip — the binary plus this README and `LICENSE`, with a SHA-256
+checksum — run the script for your platform:
+
+```sh
+scripts/release.sh
+```
+
+```powershell
+scripts/release.ps1
+```
+
+The archive is written to `dist/` as `gmail-tui-<version>-<target>.zip`, next to a matching
+`.sha256` file. Each script builds for the **current machine only**; the shell script needs
+`zip` on your `PATH` (run `chmod +x scripts/release.sh` once after checkout).
 
 ## Setup
 
@@ -153,10 +171,14 @@ focused pane has a yellow border.
 
 | Key        | Action                                    |
 |------------|-------------------------------------------|
-| `Tab`      | Move to the next field (To / Subject / Body) |
+| `Tab`      | Move to the next field                    |
 | `Shift+Tab`| Move to the previous field                |
 | `Ctrl+S`   | Send                                      |
 | `Esc`      | Close the composer / discard the draft    |
+
+`Tab` cycles through the fields in order: `To` → `Cc` → `Bcc` → `Subject` → `Body`. The `To`,
+`Cc`, and `Bcc` fields each accept several addresses, separated by commas or semicolons, and
+`Cc` and `Bcc` may be left empty.
 
 The message body uses a full text editor: arrow keys, selection, and undo all work as you
 would expect.

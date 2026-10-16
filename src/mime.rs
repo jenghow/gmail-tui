@@ -63,6 +63,8 @@ pub fn parse_body(raw: &[u8]) -> EmailBody {
             date: String::new(),
             from: String::new(),
             to: String::new(),
+            cc: String::new(),
+            bcc: String::new(),
             subject: String::new(),
             body: String::from_utf8_lossy(raw).into_owned(),
         };
@@ -74,6 +76,8 @@ pub fn parse_body(raw: &[u8]) -> EmailBody {
         date: header("Date"),
         from: header("From"),
         to: header("To"),
+        cc: header("Cc"),
+        bcc: header("Bcc"),
         subject: header("Subject"),
         body: text_of(&parsed),
     }
@@ -90,6 +94,8 @@ pub fn body_from_parts(header: &[u8], text: String) -> EmailBody {
             date: String::new(),
             from: String::new(),
             to: String::new(),
+            cc: String::new(),
+            bcc: String::new(),
             subject: String::new(),
             body: text,
         };
@@ -100,6 +106,8 @@ pub fn body_from_parts(header: &[u8], text: String) -> EmailBody {
         date: value("Date"),
         from: value("From"),
         to: value("To"),
+        cc: value("Cc"),
+        bcc: value("Bcc"),
         subject: value("Subject"),
         body: text,
     }
@@ -314,6 +322,8 @@ mod tests {
     fn parses_a_simple_message() {
         let raw = b"From: Alice <alice@example.com>\r\n\
                     To: bob@example.com\r\n\
+                    Cc: carol@example.com\r\n\
+                    Bcc: dave@example.com\r\n\
                     Subject: =?UTF-8?Q?caf=C3=A9?=\r\n\
                     Date: Thu, 16 Oct 2026 09:00:00 +0000\r\n\
                     \r\n\
@@ -323,6 +333,8 @@ mod tests {
         assert_eq!(body.subject, "café");
         assert_eq!(body.from, "Alice <alice@example.com>");
         assert_eq!(body.to, "bob@example.com");
+        assert_eq!(body.cc, "carol@example.com");
+        assert_eq!(body.bcc, "dave@example.com");
         assert_eq!(body.body.trim(), "Hello there.");
     }
 
@@ -418,6 +430,7 @@ mod tests {
     fn builds_a_message_from_a_header_block() {
         let header = b"From: Alice <alice@example.com>\r\n\
                        To: bob@example.com\r\n\
+                       Cc: carol@example.com\r\n\
                        Subject: =?UTF-8?Q?caf=C3=A9?=\r\n\
                        Date: Thu, 16 Oct 2026 09:00:00 +0000\r\n\
                        \r\n";
@@ -426,7 +439,28 @@ mod tests {
         assert_eq!(body.subject, "café");
         assert_eq!(body.from, "Alice <alice@example.com>");
         assert_eq!(body.to, "bob@example.com");
+        assert_eq!(body.cc, "carol@example.com");
+        assert_eq!(body.bcc, "");
         assert_eq!(body.date, "Thu, 16 Oct 2026 09:00:00 +0000");
         assert_eq!(body.body, "Hello there.");
+    }
+
+    #[test]
+    fn header_lines_omit_empty_cc_and_bcc() {
+        let plain = EmailBody {
+            date: "now".to_string(),
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "hi".to_string(),
+            body: "body".to_string(),
+        };
+        let labels: Vec<&str> = plain.header_lines().iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["From", "To", "Date", "Subject"]);
+
+        let copied = EmailBody { cc: "x@y.com".to_string(), ..plain };
+        let labels: Vec<&str> = copied.header_lines().iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["From", "To", "Cc", "Date", "Subject"]);
     }
 }

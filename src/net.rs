@@ -66,6 +66,8 @@ pub enum NetCmd {
     /// Submit a message over SMTP.
     Send {
         to: String,
+        cc: String,
+        bcc: String,
         subject: String,
         body: String,
     },
@@ -283,11 +285,11 @@ impl Worker {
             NetCmd::FetchBody { mailbox, uid } => self.load_body(&mailbox, uid).await,
             NetCmd::SetSeen { mailbox, uid, seen } => self.set_seen(&mailbox, uid, seen).await,
             NetCmd::Search { mailbox, query } => self.search(&mailbox, &query).await,
-            NetCmd::Send { to, subject, body } => {
+            NetCmd::Send { to, cc, bcc, subject, body } => {
                 // SMTP is a separate connection, so a failure here says nothing
                 // about the IMAP session. It is reported to the composer rather
                 // than fed to the reconnect logic.
-                match self.send_mail(&to, &subject, &body).await {
+                match self.send_mail(&to, &cc, &bcc, &subject, &body).await {
                     Ok(()) => {
                         self.send(NetMsg::Sent { to }).await;
                     }
@@ -584,14 +586,29 @@ impl Worker {
     async fn send_mail(
         &self,
         to: &str,
+        cc: &str,
+        bcc: &str,
         subject: &str,
         body: &str,
     ) -> std::result::Result<(), String> {
-        let message = Message::builder()
+        let mut builder = Message::builder()
             .from(parse_address(&self.user, "the configured Gmail address")?)
-            .to(parse_address(to, "the \"To\" address")?)
             .subject(subject)
-            .date_now()
+            .date_now();
+
+        // Each field may hold a comma- or semicolon-separated list; `Cc` and
+        // `Bcc` are frequently left empty, which simply adds no recipient.
+        for address in parse_addresses(to, "the \"To\" address")? {
+            builder = builder.to(address);
+        }
+        for address in parse_addresses(cc, "a \"Cc\" address")? {
+            builder = builder.cc(address);
+        }
+        for address in parse_addresses(bcc, "a \"Bcc\" address")? {
+            builder = builder.bcc(address);
+        }
+
+        let message = builder
             .body(body.to_string())
             .map_err(|err| format!("could not build the message: {err}"))?;
 
@@ -814,6 +831,17 @@ fn parse_address(value: &str, what: &str) -> std::result::Result<SmtpAddress, St
         .map_err(|err| format!("{what} \"{value}\" is not a valid address: {err}"))
 }
 
+/// Parse a comma- or semicolon-separated address list. A blank value yields no
+/// addresses, which is how an unused `Cc`/`Bcc` reaches the builder.
+fn parse_addresses(value: &str, what: &str) -> std::result::Result<Vec<SmtpAddress>, String> {
+    value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| parse_address(part, what))
+        .collect()
+}
+
 /// Decide whether a failed login is worth retrying.
 fn login_failure(user: &str, err: ImapError) -> Connect {
     let message = err.to_string();
@@ -992,6 +1020,34 @@ mod tests {
 
         let order: Vec<&str> = mailboxes.iter().map(|m| m.display.as_str()).collect();
         assert_eq!(order, ["Inbox", "Sent", "Trash", "Work"]);
+    }
+
+    #[test]
+    fn parses_a_single_address() {
+        let addresses = parse_addresses("bob@example.com", "the \"To\" address").expect("one");
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].email.to_string(), "bob@example.com");
+    }
+
+    #[test]
+    fn parses_a_comma_or_semicolon_separated_list() {
+        let addresses =
+            parse_addresses("a@example.com, b@example.com; c@example.com", "a \"Cc\" address")
+                .expect("three addresses");
+        let emails: Vec<String> = addresses.iter().map(|a| a.email.to_string()).collect();
+        assert_eq!(emails, ["a@example.com", "b@example.com", "c@example.com"]);
+    }
+
+    #[test]
+    fn a_blank_list_yields_no_addresses() {
+        assert!(parse_addresses("", "a \"Cc\" address").expect("empty").is_empty());
+        assert!(parse_addresses(" , ; ", "a \"Cc\" address").expect("blank").is_empty());
+    }
+
+    #[test]
+    fn an_invalid_address_names_its_field() {
+        let err = parse_addresses("not an address", "a \"Bcc\" address").unwrap_err();
+        assert!(err.contains("a \"Bcc\" address"), "{err}");
     }
 
     #[test]

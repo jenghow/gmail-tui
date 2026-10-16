@@ -7,7 +7,7 @@ mod search;
 mod status;
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
 use ratatui::Frame;
 
@@ -57,5 +57,20 @@ fn panel(title: String, focused: bool) -> Block<'static> {
         block.border_style(Style::new().fg(Color::Yellow))
     } else {
         block
+    }
+}
+
+/// The colour for a header key in the reader and composer. The five envelope
+/// keys are bold and tinted; `Date` is deliberately muted so it recedes; the
+/// value next to a key always keeps the terminal's default colour.
+fn header_label_style(label: &str) -> Style {
+    match label {
+        "From" => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        "To" => Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+        "Cc" => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        "Bcc" => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        "Subject" => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "Date" => Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        _ => Style::new(),
     }
 }

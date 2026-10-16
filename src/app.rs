@@ -30,6 +30,8 @@ pub enum Pane {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeField {
     To,
+    Cc,
+    Bcc,
     Subject,
     Body,
 }
@@ -108,6 +110,8 @@ impl LineInput {
 /// State for the compose screen.
 pub struct ComposeState {
     pub to: LineInput,
+    pub cc: LineInput,
+    pub bcc: LineInput,
     pub subject: LineInput,
     pub body: TextArea<'static>,
     pub field: ComposeField,
@@ -123,6 +127,8 @@ impl ComposeState {
 
         Self {
             to: LineInput::default(),
+            cc: LineInput::default(),
+            bcc: LineInput::default(),
             subject: LineInput::default(),
             body,
             field: ComposeField::To,
@@ -130,11 +136,17 @@ impl ComposeState {
     }
 
     fn is_empty(&self) -> bool {
-        self.to.is_blank() && self.subject.is_blank() && self.body.is_empty()
+        self.to.is_blank()
+            && self.cc.is_blank()
+            && self.bcc.is_blank()
+            && self.subject.is_blank()
+            && self.body.is_empty()
     }
 
     fn reset(&mut self) {
         self.to.clear();
+        self.cc.clear();
+        self.bcc.clear();
         self.subject.clear();
         self.body.clear();
         self.field = ComposeField::To;
@@ -142,7 +154,9 @@ impl ComposeState {
 
     fn next_field(&mut self) {
         self.field = match self.field {
-            ComposeField::To => ComposeField::Subject,
+            ComposeField::To => ComposeField::Cc,
+            ComposeField::Cc => ComposeField::Bcc,
+            ComposeField::Bcc => ComposeField::Subject,
             ComposeField::Subject => ComposeField::Body,
             ComposeField::Body => ComposeField::To,
         };
@@ -151,7 +165,9 @@ impl ComposeState {
     fn prev_field(&mut self) {
         self.field = match self.field {
             ComposeField::To => ComposeField::Body,
-            ComposeField::Subject => ComposeField::To,
+            ComposeField::Cc => ComposeField::To,
+            ComposeField::Bcc => ComposeField::Cc,
+            ComposeField::Subject => ComposeField::Bcc,
             ComposeField::Body => ComposeField::Subject,
         };
     }
@@ -362,6 +378,12 @@ impl AppState {
                 ComposeField::To => {
                     self.compose.to.handle(key);
                 }
+                ComposeField::Cc => {
+                    self.compose.cc.handle(key);
+                }
+                ComposeField::Bcc => {
+                    self.compose.bcc.handle(key);
+                }
                 ComposeField::Subject => {
                     self.compose.subject.handle(key);
                 }
@@ -536,6 +558,8 @@ impl AppState {
             return;
         }
 
+        let cc = self.compose.cc.text.trim().to_string();
+        let bcc = self.compose.bcc.text.trim().to_string();
         let subject = self.compose.subject.text.trim().to_string();
         let body = self.compose.text();
         // The draft is deliberately kept until the server accepts it, so a
@@ -544,7 +568,7 @@ impl AppState {
         self.sending = true;
         self.mode = Mode::Normal;
         self.status = format!("sending to {to}…");
-        self.send(NetCmd::Send { to, subject, body });
+        self.send(NetCmd::Send { to, cc, bcc, subject, body });
     }
 
     fn begin_search(&mut self) {
@@ -614,6 +638,39 @@ mod tests {
         assert_eq!(app.pane, Pane::Body);
         app.toggle_pane();
         assert_eq!(app.pane, Pane::Mailboxes);
+    }
+
+    #[test]
+    fn tab_cycles_every_compose_field_then_returns() {
+        let mut compose = ComposeState::new();
+        assert_eq!(compose.field, ComposeField::To);
+
+        for expected in [
+            ComposeField::Cc,
+            ComposeField::Bcc,
+            ComposeField::Subject,
+            ComposeField::Body,
+            ComposeField::To,
+        ] {
+            compose.next_field();
+            assert_eq!(compose.field, expected);
+        }
+
+        // And the reverse order, from `To`, lands on `Body`.
+        compose.prev_field();
+        assert_eq!(compose.field, ComposeField::Body);
+    }
+
+    #[test]
+    fn a_draft_with_only_cc_text_is_not_empty() {
+        let mut compose = ComposeState::new();
+        assert!(compose.is_empty());
+
+        compose.cc.text.push_str("carol@example.com");
+        assert!(!compose.is_empty());
+
+        compose.reset();
+        assert!(compose.is_empty());
     }
 
     #[test]

@@ -6,9 +6,13 @@ Edition 2024 (needs Rust >= 1.85); no workspace, no library target, no CI.
 ## Commands
 
 - Build: `cargo build` / `cargo build --release`
-- Test: `cargo test` — 50 pure unit tests, fully offline (no Gmail account or network needed)
+- Test: `cargo test` — 57 pure unit tests, fully offline (no Gmail account or network needed)
 - Single test: `cargo test <substring>` (e.g. `cargo test pick_text_section`)
 - Lint: `cargo clippy --all-targets` (currently warning-clean)
+- Release: `scripts/release.ps1` (Windows) or `scripts/release.sh` (Linux/macOS) — `cargo build
+  --release --locked`, then zip the binary with `README.md` + `LICENSE` into `dist/` (gitignored)
+  plus a `.sha256` checksum. Each packages the *current host* only; the shell script requires `zip`
+  on `PATH` (no tar.gz fallback). Mark it executable once: `chmod +x scripts/release.sh`.
 - **Do not run `cargo fmt`.** The tree is deliberately hand-formatted and is *not* rustfmt-clean —
   every file in `src/` differs from `rustfmt`. Running it rewrites essentially the whole repo and
   buries your change. Match the surrounding style by hand.
@@ -33,7 +37,8 @@ Module map:
 - `net.rs` — one worker does IMAP (read) and SMTP (send). Reconnects with exponential backoff,
   never tight-loops (Gmail locks the account for ~a day above 10 simultaneous IMAP connections).
 - `app.rs` — `AppState`, modes (`Normal`/`Compose`/`Search`), and all key handling.
-- `ui/` — pure rendering only (`mailbox`, `compose`, `search`, `status`).
+- `ui/` — pure rendering only (`mailbox`, `compose`, `search`, `status`). Header keys are tinted by
+  `header_label_style`; all colour decisions live here.
 - `mime.rs` — RFC 2047 / MIME parsing (`mailparse`); `message.rs` — plain shared data types.
 - `credentials/` — `os.rs` (keyring) + `file.rs` (passphrase-encrypted file); `config.rs` — args + `config.toml`; `fsx.rs` — atomic file writes.
 
@@ -43,6 +48,11 @@ Module map:
   flips the flag. Preserve this.
 - `ratatui` needs the `unstable-rendered-line-info` feature (for `Paragraph::line_count`); without it
   the reader's scroll clamping does not compile. Treat as a hard requirement.
+- Reader and composer header keys are styled by `header_label_style` (`From`/`To`/`Cc`/`Bcc`/`Subject`
+  bold in a colour each, `Date` dimmed); values always keep the terminal's default colour. Styling
+  stays in `ui/` — `message.rs` is ratatui-free and exposes plain `EmailBody::header_lines()` pairs.
+- SMTP `Send` carries `cc`/`bcc` next to `to`. `net.rs` splits each field on `,`/`;` with
+  `parse_addresses` (blank is allowed for Cc/Bcc); `mime.rs` parses `Cc`/`Bcc` into `EmailBody`.
 - All async deps are pinned to the tokio runtime via features (`runtime-tokio`, `tokio1-native-tls`)
   specifically to avoid linking a second runtime or TLS stack. Don't flip these features casually.
 - TLS is `native-tls`/SChannel on Windows; a Linux build additionally needs `libssl-dev` + `pkg-config`.

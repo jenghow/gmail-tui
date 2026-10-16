@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{AppState, ComposeField, LineInput};
 
-/// Width of the `To:` / `Subject:` label column.
+/// Width of the envelope label column (`To:` … `Subject:`).
 const LABEL_WIDTH: usize = 9;
 
 pub fn draw(frame: &mut Frame, app: &AppState, area: Rect) {
@@ -16,7 +16,9 @@ pub fn draw(frame: &mut Frame, app: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [to_row, subject_row, rule, body_row] = Layout::vertical([
+    let [to_row, cc_row, bcc_row, subject_row, rule, body_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -27,14 +29,28 @@ pub fn draw(frame: &mut Frame, app: &AppState, area: Rect) {
     draw_field(
         frame,
         to_row,
-        "To:",
+        "To",
         &app.compose.to,
         app.compose.field == ComposeField::To,
     );
     draw_field(
         frame,
+        cc_row,
+        "Cc",
+        &app.compose.cc,
+        app.compose.field == ComposeField::Cc,
+    );
+    draw_field(
+        frame,
+        bcc_row,
+        "Bcc",
+        &app.compose.bcc,
+        app.compose.field == ComposeField::Bcc,
+    );
+    draw_field(
+        frame,
         subject_row,
-        "Subject:",
+        "Subject",
         &app.compose.subject,
         app.compose.field == ComposeField::Subject,
     );
@@ -48,15 +64,18 @@ pub fn draw(frame: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn draw_field(frame: &mut Frame, area: Rect, label: &str, input: &LineInput, focused: bool) {
-    let label_style = Style::new().add_modifier(Modifier::DIM);
+    // The key is always tinted and bold; only the value dims when the field is
+    // not focused, so the coloured labels read as fixed furniture.
+    let label_style = super::header_label_style(label);
     let value_style = if focused {
         Style::new()
     } else {
         Style::new().add_modifier(Modifier::DIM)
     };
 
+    let name = format!("{label}:");
     let line = Line::from(vec![
-        Span::styled(format!("{label:<width$}", width = LABEL_WIDTH), label_style),
+        Span::styled(format!("{name:<width$}", width = LABEL_WIDTH), label_style),
         Span::styled(input.text.as_str(), value_style),
     ]);
     frame.render_widget(Paragraph::new(line), area);

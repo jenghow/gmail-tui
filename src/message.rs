@@ -45,18 +45,28 @@ pub struct EmailBody {
     pub date: String,
     pub from: String,
     pub to: String,
+    pub cc: String,
+    pub bcc: String,
     pub subject: String,
     pub body: String,
 }
 
 impl EmailBody {
-    /// Header block, blank line, then the message body — as shown in the
-    /// reading pane.
-    pub fn to_display(&self) -> String {
-        format!(
-            "From: {}\nTo: {}\nDate: {}\nSubject: {}\n\n{}",
-            self.from, self.to, self.date, self.subject, self.body
-        )
+    /// The reading pane's header as `(label, value)` pairs, in display order.
+    /// `Cc` and `Bcc` are dropped when the message carries none, so a plain
+    /// message shows no empty rows. Rendering owns the styling; this stays
+    /// plain data like the rest of the module.
+    pub fn header_lines(&self) -> Vec<(&'static str, &str)> {
+        let mut lines = vec![("From", self.from.as_str()), ("To", self.to.as_str())];
+        if !self.cc.is_empty() {
+            lines.push(("Cc", self.cc.as_str()));
+        }
+        if !self.bcc.is_empty() {
+            lines.push(("Bcc", self.bcc.as_str()));
+        }
+        lines.push(("Date", self.date.as_str()));
+        lines.push(("Subject", self.subject.as_str()));
+        lines
     }
 
     /// Envelope-only placeholder shown while the real body is downloading.
@@ -65,6 +75,8 @@ impl EmailBody {
             date: summary.date.clone(),
             from: summary.from.clone(),
             to: String::new(),
+            cc: String::new(),
+            bcc: String::new(),
             subject: summary.subject.clone(),
             body: "(loading…)".to_string(),
         }

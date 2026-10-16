@@ -2,12 +2,14 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Cell, HighlightSpacing, List, ListItem, Paragraph, Row, Table, Wrap,
 };
 use ratatui::Frame;
 
 use crate::app::{AppState, Pane};
+use crate::message::EmailBody;
 
 pub fn draw(frame: &mut Frame, app: &mut AppState, area: Rect) {
     let [left, right] =
@@ -89,11 +91,11 @@ fn draw_reader(frame: &mut Frame, app: &mut AppState, area: Rect) {
     let (title, text) = match &app.message {
         Some(message) => (
             format!(" Message: {} ", message.subject),
-            message.to_display(),
+            message_lines(message),
         ),
         None => (
             " Message ".to_string(),
-            "No message selected.\n\nUse ↑/↓ to pick one and enter to (re)load it.".to_string(),
+            Text::raw("No message selected.\n\nUse ↑/↓ to pick one and enter to (re)load it."),
         ),
     };
 
@@ -119,4 +121,30 @@ fn draw_reader(frame: &mut Frame, app: &mut AppState, area: Rect) {
     app.body_scroll = app.body_scroll.min(app.body_max_scroll);
 
     frame.render_widget(paragraph.scroll((app.body_scroll, 0)), area);
+}
+
+/// The reading pane's content: the header keys styled with [`super::header_label_style`],
+/// a blank line, then the message body verbatim. The result is owned so the
+/// reader can mutate `AppState` after building it.
+fn message_lines(message: &EmailBody) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = message
+        .header_lines()
+        .into_iter()
+        .map(|(label, value)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{label}: "),
+                    super::header_label_style(label),
+                ),
+                Span::raw(value.to_string()),
+            ])
+        })
+        .collect();
+
+    lines.push(Line::default());
+    if !message.body.is_empty() {
+        lines.extend(Text::raw(message.body.clone()).lines);
+    }
+
+    Text::from(lines)
 }

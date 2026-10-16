@@ -1,7 +1,8 @@
 //! State 3: the centred search modal.
 
 use ratatui::layout::{Position, Rect};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::AppState;
@@ -12,7 +13,10 @@ pub fn draw(frame: &mut Frame, app: &AppState, area: Rect) {
     // `Clear` erases whatever the mailbox view already painted underneath.
     frame.render_widget(Clear, popup);
 
-    let block = Block::bordered().title(" Search ");
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title(" Search ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
