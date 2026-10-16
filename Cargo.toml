@@ -1,0 +1,60 @@
+[package]
+name = "gmail-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal TUI Gmail client"
+
+[dependencies]
+# --- Phase 1: UI + async runtime -------------------------------------------
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, which the
+# reader needs in order to clamp scrolling to the real wrapped height. With the
+# feature off the method is crate-private and the build fails, so this is a hard
+# requirement rather than a convenience.
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+anyhow = "1"
+ratatui-textarea = "0.9"
+
+# --- Phase 2: config + credentials -----------------------------------------
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+directories = "6"
+# Default feature "v1" wires the Windows Credential Manager, macOS Keychain and
+# the Linux Secret Service (zbus, pure Rust — no libdbus needed).
+keyring = "4"
+rpassword = "7"
+zeroize = "1"
+# Passphrase-based file fallback for when the OS keyring is unusable (headless
+# Linux, containers, WSL). Chosen over the `age` crate, which would pull ~41
+# dependencies (hpke, ml-kem, p256, fluent i18n) for the same two primitives.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.3"
+
+# --- Phase 2: IMAP + MIME parsing ------------------------------------------
+# Both of these default to a *different* async runtime; without the tokio
+# feature we would link a second one.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+# `native-tls` means SChannel on Windows, so no C toolchain is involved here.
+# A Linux build, however, needs the OpenSSL development files — `libssl-dev`
+# and `pkg-config` — or it stops at "could not find system library 'openssl'".
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+mailparse = "0.18"
+chrono = "0.4"
+# Already a transitive dependency of async-imap; declared directly so that the
+# `Address`, `Envelope` and `BodyStructure` types it hands us can be named.
+imap-proto = "0.17"
+
+# --- Phase 3: SMTP ---------------------------------------------------------
+# Gmail files an accepted message into Sent by itself, so sending is SMTP only
+# and no IMAP APPEND step is needed. `tokio1-native-tls` deliberately matches
+# the TLS stack already used for IMAP; `tokio1-rustls-tls` would link a second
+# complete TLS implementation into the same binary.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "hostname",
+    "smtp-transport",
+    "tokio1-native-tls",
+] }
