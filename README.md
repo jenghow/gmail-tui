@@ -11,7 +11,8 @@ password**. There is no browser, no OAuth dance, and no server in the middle.
 
 - Three-pane layout: mailboxes, message list, and reading pane
 - Unread counts per folder, with Gmail's folders (Inbox, Starred, Sent, …) ordered first
-- Plain-text reading pane; `text/html` messages are reduced to text automatically
+- Reading pane prefers `text/plain`; HTML-only mail is rendered with real bold, italic,
+  links, and headings at the terminal's width
 - Colour-coded header keys (From / To / Cc / Bcc / Subject) in the reading pane and composer
 - Compose and send messages, with Cc and Bcc (Gmail files them into **Sent** for you)
 - Mark messages read / unread
@@ -195,8 +196,9 @@ would expect.
 - Opening a message does **not** mark it read. Only pressing `m` changes the read/unread
   flag, so you can browse without disturbing your unread counts.
 - Each folder shows its **50 newest** messages, and search returns at most 50 hits.
-- Messages are shown as plain text. HTML is converted to text with formatting dropped,
-  and attachments are neither downloaded nor displayed.
+- HTML-only messages are rendered as styled text — emphasis, links, and headings survive,
+  while scripts, styles, CSS colours, and remote images are dropped. Attachments are
+  neither downloaded nor displayed.
 - Reading and sending only — there is no delete, archive, star, or label management.
 - Gmail permits only a small number of simultaneous IMAP connections and locks the account
   for about a day if that is abused. The client reconnects gently with a backoff and never

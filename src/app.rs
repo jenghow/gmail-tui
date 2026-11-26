@@ -10,7 +10,7 @@ use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 
 use crate::event::AppEvent;
-use crate::message::{EmailBody, EmailSummary, Mailbox};
+use crate::message::{EmailBody, EmailSummary, Mailbox, StyledBody};
 use crate::net::{NetCmd, NetMsg};
 
 /// How long the highlight must rest before its body is downloaded. A burst of
@@ -230,6 +230,13 @@ impl BodyCache {
     }
 }
 
+/// An HTML body laid out for one reader width. The reader rebuilds it when the
+/// terminal is resized; every other frame reuses it.
+struct BodyLayout {
+    width: u16,
+    lines: StyledBody,
+}
+
 pub struct AppState {
     pub should_quit: bool,
     pub mode: Mode,
@@ -259,6 +266,9 @@ pub struct AppState {
     pending_body: Option<PendingBody>,
     /// Recently downloaded bodies, for instant back-and-forth navigation.
     body_cache: BodyCache,
+    /// The current HTML body's styled lines, tagged with the reader width
+    /// they were laid out at.
+    body_layout: Option<BodyLayout>,
 
     /// Reader rows visible inside its border, and the largest meaningful
     /// `body_scroll`. The reader rewrites both on every frame, because only it
@@ -288,6 +298,7 @@ impl AppState {
             body_scroll: 0,
             pending_body: None,
             body_cache: BodyCache::default(),
+            body_layout: None,
             body_viewport: 0,
             body_max_scroll: 0,
             search: LineInput::default(),
@@ -352,7 +363,7 @@ impl AppState {
                 if current {
                     self.pending_body = None;
                     self.body_scroll = 0;
-                    self.message = Some(body);
+                    self.show_message(Some(body));
                 }
             }
             NetMsg::Seen { mailbox, uid, seen } => {
@@ -554,7 +565,7 @@ impl AppState {
         self.current_mailbox = mailbox.clone();
         self.emails.clear();
         self.email_state.select(None);
-        self.message = None;
+        self.show_message(None);
         self.body_scroll = 0;
         self.pending_body = None;
         self.status = format!("loading {mailbox}…");
@@ -568,14 +579,14 @@ impl AppState {
     fn schedule_body_load(&mut self) {
         let Some(summary) = self.selected_summary() else {
             self.pending_body = None;
-            self.message = None;
+            self.show_message(None);
             return;
         };
 
         if let Some(body) = self.body_cache.get(&self.current_mailbox, summary.uid) {
             self.pending_body = None;
             self.body_scroll = 0;
-            self.message = Some(body);
+            self.show_message(Some(body));
             return;
         }
 
@@ -611,7 +622,7 @@ impl AppState {
     fn reload_selected_message(&mut self) {
         self.pending_body = None;
         let Some(summary) = self.selected_summary() else {
-            self.message = None;
+            self.show_message(None);
             return;
         };
         let mailbox = self.current_mailbox.clone();
@@ -622,8 +633,39 @@ impl AppState {
     fn begin_body_fetch(&mut self, summary: EmailSummary, mailbox: String) {
         self.body_scroll = 0;
         // Show the envelope immediately; the body fills in when it arrives.
-        self.message = Some(EmailBody::loading(&summary));
+        self.show_message(Some(EmailBody::loading(&summary)));
         self.send(NetCmd::FetchBody { mailbox, uid: summary.uid });
+    }
+
+    /// Swap the reader's message, discarding any layout of the old HTML body.
+    fn show_message(&mut self, message: Option<EmailBody>) {
+        self.message = message;
+        self.body_layout = None;
+    }
+
+    /// Lay the current HTML body out for `width`, rebuilding only when the
+    /// reader's width has changed since the last frame.
+    ///
+    /// This is pure in-memory work — the network task is never involved — and
+    /// the result is cached, so only a resize pays for a parse.
+    pub fn ensure_body_layout(&mut self, width: u16) {
+        let Some(html) = self.message.as_ref().and_then(|message| message.html.as_deref()) else {
+            self.body_layout = None;
+            return;
+        };
+        if width == 0 {
+            return;
+        }
+        if self.body_layout.as_ref().is_some_and(|layout| layout.width == width) {
+            return;
+        }
+        let lines = crate::mime::render_html(html, usize::from(width));
+        self.body_layout = Some(BodyLayout { width, lines });
+    }
+
+    /// The current HTML body's styled lines, if it has been laid out.
+    pub fn styled_body(&self) -> Option<&StyledBody> {
+        self.body_layout.as_ref().map(|layout| &layout.lines)
     }
 
     fn selected_summary(&self) -> Option<EmailSummary> {
@@ -780,6 +822,7 @@ mod tests {
             bcc: String::new(),
             subject: subject.to_string(),
             body: "hello".to_string(),
+            html: None,
         }
     }
 
@@ -987,5 +1030,42 @@ mod tests {
         app.reload_selected_message();
         assert_eq!(app.message.as_ref().unwrap().body, "(loading…)");
         assert!(app.pending_body.is_none());
+    }
+
+    #[test]
+    fn html_bodies_are_laid_out_at_the_reader_width() {
+        let mut app = app();
+        let html = format!("<p>{}</p>", vec!["word"; 40].join(" "));
+        let mut message = body("html");
+        message.body = String::new();
+        message.html = Some(html);
+        app.message = Some(message);
+
+        app.ensure_body_layout(20);
+        let narrow = app.styled_body().expect("layout").lines.len();
+        assert_eq!(app.body_layout.as_ref().unwrap().width, 20);
+
+        // The same width reuses the cached lines...
+        app.ensure_body_layout(20);
+        assert_eq!(app.styled_body().unwrap().lines.len(), narrow);
+
+        // ...a resize lays them out again.
+        app.ensure_body_layout(80);
+        assert_eq!(app.body_layout.as_ref().unwrap().width, 80);
+        assert!(app.styled_body().unwrap().lines.len() < narrow);
+    }
+
+    #[test]
+    fn switching_messages_discards_the_html_layout() {
+        let mut app = app();
+        let mut message = body("html");
+        message.html = Some("<p>one</p>".to_string());
+        app.message = Some(message);
+        app.ensure_body_layout(40);
+        assert!(app.styled_body().is_some());
+
+        app.show_message(Some(body("plain")));
+
+        assert!(app.styled_body().is_none());
     }
 }

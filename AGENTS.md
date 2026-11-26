@@ -6,7 +6,7 @@ Edition 2024 (needs Rust >= 1.85); no workspace, no library target, no CI.
 ## Commands
 
 - Build: `cargo build` / `cargo build --release`
-- Test: `cargo test` — 65 pure unit tests, fully offline (no Gmail account or network needed)
+- Test: `cargo test` — 74 pure unit tests, fully offline (no Gmail account or network needed)
 - Single test: `cargo test <substring>` (e.g. `cargo test pick_text_section`)
 - Lint: `cargo clippy --all-targets` (currently warning-clean)
 - Release: `scripts/release.ps1` (Windows) or `scripts/release.sh` (Linux/macOS) — `cargo build
@@ -39,7 +39,8 @@ Module map:
 - `app.rs` — `AppState`, modes (`Normal`/`Compose`/`Search`), and all key handling.
 - `ui/` — pure rendering only (`mailbox`, `compose`, `search`, `status`). Header keys are tinted by
   `header_label_style`; all colour decisions live here.
-- `mime.rs` — RFC 2047 / MIME parsing (`mailparse`); `message.rs` — plain shared data types.
+- `mime.rs` — RFC 2047 / MIME parsing (`mailparse`) and HTML → styled spans (`html2text`);
+  `message.rs` — plain shared data types (ratatui-free, including `StyledBody`).
 - `credentials/` — `os.rs` (keyring) + `file.rs` (passphrase-encrypted file); `config.rs` — args + `config.toml`; `fsx.rs` — atomic file writes.
 
 ## Conventions & gotchas
@@ -50,6 +51,14 @@ Module map:
   one fetch the user settles on. `NetMsg::Body` carries its mailbox/uid so stale replies are cached
   but never rendered, and the worker coalesces queued `FetchBody` bursts. Do not reintroduce a
   network fetch per key event — enter/refresh are the explicit bypasses.
+- HTML bodies: `text/plain` still wins when present. An HTML-only body keeps its decoded source in
+  `EmailBody.html`; the reader lays it out with `html2text::from_read_rich` at the exact reader
+  width and caches the result in `AppState` until a resize (layout is width-dependent, so it must
+  be rebuilt, not re-wrapped). `SpanStyle` is ratatui-free; colours live in `ui/`. CSS
+  `Colour`/`BgColour` annotations are deliberately ignored — marketing mail assumes a white page.
+  `from_read_rich` leaves `#` heading markers and strikeout combining overlays in the text, so
+  `mime.rs` converts them into bold/crossed-out spans (skipping `<pre>` lines) rather than
+  exposing markup.
 - `ratatui` needs the `unstable-rendered-line-info` feature (for `Paragraph::line_count`); without it
   the reader's scroll clamping does not compile. Treat as a hard requirement.
 - Reader and composer header keys are styled by `header_label_style` (`From`/`To`/`Cc`/`Bcc`/`Subject`

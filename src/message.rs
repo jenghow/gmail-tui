@@ -39,6 +39,60 @@ pub struct EmailSummary {
     pub seen: bool,
 }
 
+/// The semantic role of a styled body span. The UI owns the colours; this
+/// module only names what the text *is*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpanKind {
+    #[default]
+    Text,
+    Link,
+    Image,
+    Code,
+}
+
+/// Emphasis carried by one run of text in an HTML body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SpanStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub kind: SpanKind,
+}
+
+/// One contiguous run of text with a single style.
+#[derive(Debug, Clone)]
+pub struct StyledSpan {
+    pub text: String,
+    pub style: SpanStyle,
+}
+
+/// An HTML body laid out into lines of styled spans.
+///
+/// The lines are already wrapped for the width they were rendered at, so the
+/// reader rebuilds this when its width changes.
+#[derive(Debug, Clone, Default)]
+pub struct StyledBody {
+    pub lines: Vec<Vec<StyledSpan>>,
+}
+
+impl StyledBody {
+    /// A body with no styling, one span per line. Used for the plain-text
+    /// fallback when an HTML body cannot be laid out.
+    pub fn from_plain(text: &str) -> Self {
+        Self {
+            lines: text
+                .lines()
+                .map(|line| {
+                    vec![StyledSpan {
+                        text: line.to_string(),
+                        style: SpanStyle::default(),
+                    }]
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A fully fetched message.
 #[derive(Debug, Clone)]
 pub struct EmailBody {
@@ -48,7 +102,11 @@ pub struct EmailBody {
     pub cc: String,
     pub bcc: String,
     pub subject: String,
+    /// Plain-text body; empty when [`EmailBody::html`] carries the message.
     pub body: String,
+    /// Decoded HTML source, kept so the reader can re-lay it out when the
+    /// terminal is resized. `None` for plain-text messages.
+    pub html: Option<String>,
 }
 
 impl EmailBody {
@@ -79,6 +137,7 @@ impl EmailBody {
             bcc: String::new(),
             subject: summary.subject.clone(),
             body: "(loading…)".to_string(),
+            html: None,
         }
     }
 }

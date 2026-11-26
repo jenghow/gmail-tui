@@ -1,7 +1,7 @@
 //! State 1: the three-pane mailbox view.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Cell, HighlightSpacing, List, ListItem, Paragraph, Row, Table, Wrap,
@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{AppState, Pane};
-use crate::message::EmailBody;
+use crate::message::{EmailBody, SpanKind, SpanStyle, StyledBody, StyledSpan};
 
 pub fn draw(frame: &mut Frame, app: &mut AppState, area: Rect) {
     let [left, right] =
@@ -88,19 +88,25 @@ fn draw_headers(frame: &mut Frame, app: &mut AppState, area: Rect) {
 }
 
 fn draw_reader(frame: &mut Frame, app: &mut AppState, area: Rect) {
-    let (title, text) = match &app.message {
-        Some(message) => (
-            format!(" Message: {} ", message.subject),
-            message_lines(message),
-        ),
-        None => (
-            " Message ".to_string(),
-            Text::raw("No message selected.\n\nUse ↑/↓ to pick one and enter to (re)load it."),
-        ),
+    let title = match &app.message {
+        Some(message) => format!(" Message: {} ", message.subject),
+        None => " Message ".to_string(),
     };
 
     let block = super::panel(title, app.pane == Pane::Body);
     let inner = block.inner(area);
+
+    // An HTML body is wrapped for the exact reader width, so the layout is
+    // rebuilt on resize. The cache keeps every other frame free.
+    app.ensure_body_layout(inner.width);
+
+    let text = match &app.message {
+        Some(message) => message_lines(message, app.styled_body()),
+        None => Text::raw(
+            "No message selected.\n\nUse ↑/↓ to pick one and enter to (re)load it.",
+        ),
+    };
+
     let paragraph = Paragraph::new(text)
         .block(block)
         .wrap(Wrap { trim: false });
@@ -124,9 +130,10 @@ fn draw_reader(frame: &mut Frame, app: &mut AppState, area: Rect) {
 }
 
 /// The reading pane's content: the header keys styled with [`super::header_label_style`],
-/// a blank line, then the message body verbatim. The result is owned so the
-/// reader can mutate `AppState` after building it.
-fn message_lines(message: &EmailBody) -> Text<'static> {
+/// a blank line, then the body. Plain text renders verbatim; an HTML body uses
+/// the styles the renderer attached. The result is owned so the reader can
+/// mutate `AppState` after building it.
+fn message_lines(message: &EmailBody, styled: Option<&StyledBody>) -> Text<'static> {
     let mut lines: Vec<Line<'static>> = message
         .header_lines()
         .into_iter()
@@ -142,9 +149,42 @@ fn message_lines(message: &EmailBody) -> Text<'static> {
         .collect();
 
     lines.push(Line::default());
-    if !message.body.is_empty() {
+    if let Some(styled) = styled {
+        lines.extend(styled.lines.iter().map(|spans| styled_line(spans)));
+    } else if !message.body.is_empty() {
         lines.extend(Text::raw(message.body.clone()).lines);
     }
 
     Text::from(lines)
+}
+
+/// One laid-out HTML line. The mail's own CSS is ignored; these are the
+/// terminal's accents, chosen to stay readable on dark and light themes.
+fn styled_line(spans: &[StyledSpan]) -> Line<'static> {
+    Line::from(
+        spans
+            .iter()
+            .map(|span| Span::styled(span.text.clone(), span_style(span.style)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn span_style(style: SpanStyle) -> Style {
+    let mut result = Style::new();
+    if style.bold {
+        result = result.add_modifier(Modifier::BOLD);
+    }
+    if style.italic {
+        result = result.add_modifier(Modifier::ITALIC);
+    }
+    if style.strike {
+        result = result.add_modifier(Modifier::CROSSED_OUT);
+    }
+
+    match style.kind {
+        SpanKind::Link => result.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+        SpanKind::Image => result.fg(Color::DarkGray),
+        SpanKind::Code => result.fg(Color::Yellow),
+        SpanKind::Text => result,
+    }
 }

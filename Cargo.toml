@@ -42,6 +42,10 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 # and `pkg-config` — or it stops at "could not find system library 'openssl'".
 async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
 mailparse = "0.18"
+# `from_read_rich` keeps emphasis and links as per-span annotations for the
+# reader to style, instead of the markdown-ish markup `from_read` emits.
+# Pure Rust and runtime-agnostic, so it does not disturb the tokio/TLS pins.
+html2text = "0.17"
 chrono = "0.4"
 # Already a transitive dependency of async-imap; declared directly so that the
 # `Address`, `Envelope` and `BodyStructure` types it hands us can be named.
