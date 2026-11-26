@@ -4,6 +4,7 @@
 //! ever talks to this task through the `NetCmd` / `NetMsg` channels, so a slow
 //! round-trip can never freeze rendering.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use async_imap::Session;
@@ -81,7 +82,13 @@ pub enum NetMsg {
         mailbox: String,
         headers: Vec<EmailSummary>,
     },
-    Body(EmailBody),
+    /// A parsed message, tagged with its row so the UI can ignore replies for
+    /// a selection the user has already left.
+    Body {
+        mailbox: String,
+        uid: u32,
+        body: EmailBody,
+    },
     /// A flag change the server accepted, echoed back so the list can be
     /// updated without refetching it.
     Seen {
@@ -259,7 +266,25 @@ impl Worker {
             *backoff = BACKOFF_START;
         }
 
-        while let Some(cmd) = rx.recv().await {
+        // Commands are served in order, except that a burst of body requests
+        // is collapsed to the newest one (see `coalesce_bodies`). The stash
+        // holds commands already looked ahead at, so nothing is reordered.
+        let mut queued = VecDeque::new();
+
+        loop {
+            let cmd = match queued.pop_front() {
+                Some(cmd) => cmd,
+                None => match rx.recv().await {
+                    Some(cmd) => cmd,
+                    None => break,
+                },
+            };
+            let cmd = if matches!(cmd, NetCmd::FetchBody { .. }) {
+                coalesce_bodies(cmd, rx, &mut queued)
+            } else {
+                cmd
+            };
+
             match self.dispatch(cmd).await {
                 Ok(()) => *backoff = BACKOFF_START,
                 Err(Failure::Disconnected(message)) => return Serve::Disconnected(message),
@@ -460,7 +485,12 @@ impl Worker {
             None => self.fetch_whole(uid).await?,
         };
 
-        self.send(NetMsg::Body(body)).await;
+        self.send(NetMsg::Body {
+            mailbox: mailbox.to_string(),
+            uid,
+            body,
+        })
+        .await;
         Ok(())
     }
 
@@ -714,6 +744,43 @@ impl Worker {
         tokio::time::sleep(backoff).await;
         !self.tx.is_closed()
     }
+}
+
+/// Collapse a run of queued body requests down to the freshest one.
+///
+/// The worker cannot abort a fetch already in flight, but it can skip every
+/// request that arrived while the user kept moving. Everything already waiting
+/// is drained into one ordered list: the last `FetchBody` keeps its place and
+/// all earlier body requests are dropped. The first surviving command is
+/// returned for dispatch; the rest go back into `queued` in order.
+fn coalesce_bodies(
+    current: NetCmd,
+    rx: &mut mpsc::Receiver<NetCmd>,
+    queued: &mut VecDeque<NetCmd>,
+) -> NetCmd {
+    // `current` was popped from the front of `queued`, so this reconstructs
+    // the full pending order: current, the rest of the stash, then the channel.
+    let mut all = vec![current];
+    all.extend(queued.drain(..));
+    while let Ok(cmd) = rx.try_recv() {
+        all.push(cmd);
+    }
+
+    let newest = all
+        .iter()
+        .rposition(|cmd| matches!(cmd, NetCmd::FetchBody { .. }))
+        .expect("coalesce_bodies is only called with a body request");
+
+    *queued = all
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, cmd)| {
+            let body = matches!(cmd, NetCmd::FetchBody { .. });
+            (!body || index == newest).then_some(cmd)
+        })
+        .collect();
+
+    queued.pop_front().expect("the body request itself is kept")
 }
 
 fn connection_lost() -> String {
@@ -1194,5 +1261,85 @@ mod tests {
     fn a_message_with_no_text_part_has_no_section() {
         assert!(pick_text_section(&attachment()).is_none());
         assert!(pick_text_section(&multipart("MIXED", vec![attachment()])).is_none());
+    }
+
+    #[test]
+    fn coalescing_drops_old_bodies_without_reordering_other_commands() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.try_send(NetCmd::FetchHeaders { mailbox: "Archive".to_string() }).unwrap();
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 2 }).unwrap();
+        tx.try_send(NetCmd::SetSeen {
+            mailbox: "INBOX".to_string(),
+            uid: 9,
+            seen: true,
+        })
+        .unwrap();
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 3 }).unwrap();
+
+        let mut queued = VecDeque::new();
+        let next = coalesce_bodies(
+            NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 1 },
+            &mut rx,
+            &mut queued,
+        );
+
+        // Bodies 1 and 2 are superseded by 3; everything else keeps its order.
+        assert!(matches!(next, NetCmd::FetchHeaders { .. }));
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(queued.pop_front(), Some(NetCmd::SetSeen { uid: 9, .. })));
+        assert!(matches!(queued.pop_front(), Some(NetCmd::FetchBody { uid: 3, .. })));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn coalescing_keeps_only_the_latest_body_in_a_burst() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 2 }).unwrap();
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 3 }).unwrap();
+
+        let mut queued = VecDeque::new();
+        let next = coalesce_bodies(
+            NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 1 },
+            &mut rx,
+            &mut queued,
+        );
+
+        assert!(matches!(next, NetCmd::FetchBody { uid: 3, .. }));
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn coalescing_a_stashed_body_does_not_jump_the_commands_behind_it() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // First look-ahead: the headers request runs first, leaving a body and
+        // a flag change stashed in order.
+        tx.try_send(NetCmd::FetchHeaders { mailbox: "Archive".to_string() }).unwrap();
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 2 }).unwrap();
+        tx.try_send(NetCmd::SetSeen {
+            mailbox: "INBOX".to_string(),
+            uid: 9,
+            seen: true,
+        })
+        .unwrap();
+
+        let mut queued = VecDeque::new();
+        let first = coalesce_bodies(
+            NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 1 },
+            &mut rx,
+            &mut queued,
+        );
+        assert!(matches!(first, NetCmd::FetchHeaders { .. }));
+        assert_eq!(queued.len(), 2);
+
+        // The stashed body is now due, but a newer one has arrived. The flag
+        // change still runs first; both old body requests are dropped.
+        tx.try_send(NetCmd::FetchBody { mailbox: "INBOX".to_string(), uid: 3 }).unwrap();
+        let stashed = queued.pop_front().expect("stashed body");
+        assert!(matches!(stashed, NetCmd::FetchBody { uid: 2, .. }));
+        let next = coalesce_bodies(stashed, &mut rx, &mut queued);
+
+        assert!(matches!(next, NetCmd::SetSeen { uid: 9, .. }));
+        assert!(matches!(queued.pop_front(), Some(NetCmd::FetchBody { uid: 3, .. })));
+        assert!(queued.is_empty());
     }
 }

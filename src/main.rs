@@ -95,7 +95,10 @@ async fn render(
     app: &mut AppState,
     msg_rx: &mut mpsc::Receiver<NetMsg>,
 ) -> Result<()> {
-    let mut events = EventHandler::new(Duration::from_millis(250));
+    // The tick bounds how late a debounced body fetch can start. A short tick
+    // keeps the 200 ms selection debounce feeling immediate; redrawing ten
+    // times a second costs nothing.
+    let mut events = EventHandler::new(Duration::from_millis(100));
 
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, app))?;

@@ -6,7 +6,7 @@ Edition 2024 (needs Rust >= 1.85); no workspace, no library target, no CI.
 ## Commands
 
 - Build: `cargo build` / `cargo build --release`
-- Test: `cargo test` — 57 pure unit tests, fully offline (no Gmail account or network needed)
+- Test: `cargo test` — 65 pure unit tests, fully offline (no Gmail account or network needed)
 - Single test: `cargo test <substring>` (e.g. `cargo test pick_text_section`)
 - Lint: `cargo clippy --all-targets` (currently warning-clean)
 - Release: `scripts/release.ps1` (Windows) or `scripts/release.sh` (Linux/macOS) — `cargo build
@@ -46,6 +46,10 @@ Module map:
 
 - Opening a message uses `BODY.PEEK[]` on purpose so it is *not* marked `\Seen`; only the `m` key
   flips the flag. Preserve this.
+- Arrow-key selection is deliberately debounced: `app.rs` only arms a timer and the tick starts the
+  one fetch the user settles on. `NetMsg::Body` carries its mailbox/uid so stale replies are cached
+  but never rendered, and the worker coalesces queued `FetchBody` bursts. Do not reintroduce a
+  network fetch per key event — enter/refresh are the explicit bypasses.
 - `ratatui` needs the `unstable-rendered-line-info` feature (for `Paragraph::line_count`); without it
   the reader's scroll clamping does not compile. Treat as a hard requirement.
 - Reader and composer header keys are styled by `header_label_style` (`From`/`To`/`Cc`/`Bcc`/`Subject`

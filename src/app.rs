@@ -1,5 +1,8 @@
 //! Application state and the key handling that mutates it.
 
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{ListState, TableState};
@@ -9,6 +12,14 @@ use tokio::sync::mpsc;
 use crate::event::AppEvent;
 use crate::message::{EmailBody, EmailSummary, Mailbox};
 use crate::net::{NetCmd, NetMsg};
+
+/// How long the highlight must rest before its body is downloaded. A burst of
+/// arrow keys therefore only fetches the row the user settles on.
+const BODY_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// How many parsed messages stay in memory for instant re-selection. Bodies
+/// are text only (attachments are never downloaded), so this stays modest.
+const BODY_CACHE_LIMIT: usize = 32;
 
 /// Which screen is on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +189,47 @@ impl ComposeState {
     }
 }
 
+/// A body download that is waiting for the highlight to stop moving.
+struct PendingBody {
+    mailbox: String,
+    uid: u32,
+    due: Instant,
+}
+
+/// Recently parsed messages, newest at the back.
+///
+/// The cache is deliberately tiny and in-memory: it exists so that stepping
+/// back onto a message the user just read paints immediately instead of
+/// starting another IMAP round-trip.
+#[derive(Default)]
+struct BodyCache {
+    entries: VecDeque<((String, u32), EmailBody)>,
+}
+
+impl BodyCache {
+    fn get(&mut self, mailbox: &str, uid: u32) -> Option<EmailBody> {
+        let index = self
+            .entries
+            .iter()
+            .position(|((name, cached), _)| *cached == uid && name.eq_ignore_ascii_case(mailbox))?;
+        // Refresh the entry's position so the cap evicts the least recently
+        // *used* message rather than the oldest download.
+        let entry = self.entries.remove(index)?;
+        let body = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(body)
+    }
+
+    fn insert(&mut self, mailbox: &str, uid: u32, body: EmailBody) {
+        self.entries
+            .retain(|((name, cached), _)| !(*cached == uid && name.eq_ignore_ascii_case(mailbox)));
+        self.entries.push_back(((mailbox.to_string(), uid), body));
+        while self.entries.len() > BODY_CACHE_LIMIT {
+            self.entries.pop_front();
+        }
+    }
+}
+
 pub struct AppState {
     pub should_quit: bool,
     pub mode: Mode,
@@ -202,6 +254,11 @@ pub struct AppState {
 
     pub message: Option<EmailBody>,
     pub body_scroll: u16,
+
+    /// The body download waiting for the arrow keys to settle.
+    pending_body: Option<PendingBody>,
+    /// Recently downloaded bodies, for instant back-and-forth navigation.
+    body_cache: BodyCache,
 
     /// Reader rows visible inside its border, and the largest meaningful
     /// `body_scroll`. The reader rewrites both on every frame, because only it
@@ -229,6 +286,8 @@ impl AppState {
             email_state: TableState::default(),
             message: None,
             body_scroll: 0,
+            pending_body: None,
+            body_cache: BodyCache::default(),
             body_viewport: 0,
             body_max_scroll: 0,
             search: LineInput::default(),
@@ -240,7 +299,7 @@ impl AppState {
 
     pub fn on_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::Tick => {}
+            AppEvent::Tick => self.start_pending_body(),
             AppEvent::Term(Event::Key(key)) => {
                 // Windows terminals report both press and release.
                 if key.kind == KeyEventKind::Press {
@@ -278,11 +337,23 @@ impl AppState {
                 self.emails = headers;
                 self.email_state
                     .select(if self.emails.is_empty() { None } else { Some(0) });
-                self.load_selected_message();
+                self.schedule_body_load();
             }
-            NetMsg::Body(body) => {
-                self.message = Some(body);
-                self.body_scroll = 0;
+            NetMsg::Body { mailbox, uid, body } => {
+                // Cache even a reply the user has already navigated past: it
+                // makes stepping back onto that row instant. Only a reply for
+                // the highlighted row may replace what the reader shows, or a
+                // slow earlier fetch would flash under the wrong selection.
+                let current = self.current_mailbox.eq_ignore_ascii_case(&mailbox)
+                    && self
+                        .selected_summary()
+                        .is_some_and(|summary| summary.uid == uid);
+                self.body_cache.insert(&mailbox, uid, body.clone());
+                if current {
+                    self.pending_body = None;
+                    self.body_scroll = 0;
+                    self.message = Some(body);
+                }
             }
             NetMsg::Seen { mailbox, uid, seen } => {
                 // Ignore replies for a folder the user has already left.
@@ -336,7 +407,7 @@ impl AppState {
             KeyCode::Tab => self.toggle_pane(),
             KeyCode::Enter => match self.pane {
                 Pane::Mailboxes => self.select_mailbox(self.mailbox_index()),
-                Pane::Messages => self.load_selected_message(),
+                Pane::Messages => self.reload_selected_message(),
                 // The reader is already open; enter has nothing left to do.
                 Pane::Body => {}
             },
@@ -423,6 +494,11 @@ impl AppState {
                 let Some(next) = step(self.mailbox_index(), self.mailboxes.len(), delta) else {
                     return;
                 };
+                // An arrow at either end of the list moves nothing; refetching
+                // the same folder would just add work to the network queue.
+                if next == self.mailbox_index() {
+                    return;
+                }
                 self.mailbox_state.select(Some(next));
                 self.select_mailbox(next);
             }
@@ -430,8 +506,11 @@ impl AppState {
                 let Some(next) = step(self.email_index(), self.emails.len(), delta) else {
                     return;
                 };
+                if next == self.email_index() {
+                    return;
+                }
                 self.email_state.select(Some(next));
-                self.load_selected_message();
+                self.schedule_body_load();
             }
             Pane::Body => self.scroll_body(delta),
         }
@@ -457,7 +536,7 @@ impl AppState {
             },
             // There is nothing in the reader to reload but the message itself.
             Pane::Body => {
-                self.load_selected_message();
+                self.reload_selected_message();
                 return;
             }
         };
@@ -477,24 +556,78 @@ impl AppState {
         self.email_state.select(None);
         self.message = None;
         self.body_scroll = 0;
+        self.pending_body = None;
         self.status = format!("loading {mailbox}…");
         self.send(NetCmd::FetchHeaders { mailbox });
     }
 
-    /// Ask the network task for the highlighted message.
-    fn load_selected_message(&mut self) {
-        let Some(summary) = self.emails.get(self.email_index()).cloned() else {
+    /// Show the highlighted message once the selection has settled.
+    ///
+    /// A cached body paints immediately; a miss only arms the debounce, so a
+    /// burst of arrow keys never becomes one IMAP fetch per key repeat.
+    fn schedule_body_load(&mut self) {
+        let Some(summary) = self.selected_summary() else {
+            self.pending_body = None;
             self.message = None;
             return;
         };
 
+        if let Some(body) = self.body_cache.get(&self.current_mailbox, summary.uid) {
+            self.pending_body = None;
+            self.body_scroll = 0;
+            self.message = Some(body);
+            return;
+        }
+
+        self.pending_body = Some(PendingBody {
+            mailbox: self.current_mailbox.clone(),
+            uid: summary.uid,
+            due: Instant::now() + BODY_DEBOUNCE,
+        });
+    }
+
+    /// Start the debounced download once its deadline has passed.
+    fn start_pending_body(&mut self) {
+        let Some(pending) = &self.pending_body else {
+            return;
+        };
+        if Instant::now() < pending.due {
+            return;
+        }
+        let (mailbox, uid) = (pending.mailbox.clone(), pending.uid);
+        self.pending_body = None;
+
+        // The highlight may have moved while the deadline was ticking.
+        let Some(summary) = self.selected_summary() else {
+            return;
+        };
+        if summary.uid != uid || !self.current_mailbox.eq_ignore_ascii_case(&mailbox) {
+            return;
+        }
+        self.begin_body_fetch(summary, mailbox);
+    }
+
+    /// Fetch the highlighted message now, bypassing cache and debounce.
+    fn reload_selected_message(&mut self) {
+        self.pending_body = None;
+        let Some(summary) = self.selected_summary() else {
+            self.message = None;
+            return;
+        };
+        let mailbox = self.current_mailbox.clone();
+        self.begin_body_fetch(summary, mailbox);
+    }
+
+    /// Show the envelope at once and ask the worker for the body.
+    fn begin_body_fetch(&mut self, summary: EmailSummary, mailbox: String) {
         self.body_scroll = 0;
         // Show the envelope immediately; the body fills in when it arrives.
         self.message = Some(EmailBody::loading(&summary));
-        self.send(NetCmd::FetchBody {
-            mailbox: self.current_mailbox.clone(),
-            uid: summary.uid,
-        });
+        self.send(NetCmd::FetchBody { mailbox, uid: summary.uid });
+    }
+
+    fn selected_summary(&self) -> Option<EmailSummary> {
+        self.emails.get(self.email_index()).cloned()
     }
 
     /// Flip `\Seen` on the highlighted message.
@@ -628,6 +761,28 @@ mod tests {
         AppState::new(tx)
     }
 
+    fn summary(uid: u32, subject: &str) -> EmailSummary {
+        EmailSummary {
+            uid,
+            date: "2026-01-01".to_string(),
+            from: "sender@example.com".to_string(),
+            subject: subject.to_string(),
+            seen: false,
+        }
+    }
+
+    fn body(subject: &str) -> EmailBody {
+        EmailBody {
+            date: "2026-01-01".to_string(),
+            from: "sender@example.com".to_string(),
+            to: "me@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: subject.to_string(),
+            body: "hello".to_string(),
+        }
+    }
+
     #[test]
     fn tab_cycles_through_every_pane() {
         let mut app = app();
@@ -720,5 +875,117 @@ mod tests {
         assert_eq!(step(2, 3, 1), Some(2));
         assert_eq!(step(1, 3, 1), Some(2));
         assert_eq!(step(0, 0, 1), None);
+    }
+
+    #[test]
+    fn moving_the_selection_debounces_the_download() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut app = AppState::new(tx);
+        app.pane = Pane::Messages;
+        app.emails = vec![summary(1, "one"), summary(2, "two"), summary(3, "three")];
+        app.email_state.select(Some(0));
+
+        // A burst of arrow keys only remembers the row it settles on.
+        app.move_selection(1);
+        app.move_selection(1);
+        assert_eq!(app.email_index(), 2);
+        assert!(app.message.is_none());
+        assert_eq!(app.pending_body.as_ref().map(|pending| pending.uid), Some(3));
+        assert!(rx.try_recv().is_err(), "no request while the keys are moving");
+
+        // A tick before the deadline still does not start the download.
+        app.on_event(AppEvent::Tick);
+        assert!(rx.try_recv().is_err());
+        assert!(app.message.is_none());
+
+        // Once due, exactly one request goes out for the settled row.
+        app.pending_body.as_mut().unwrap().due = Instant::now();
+        app.on_event(AppEvent::Tick);
+        let sent = rx.try_recv().expect("one body request");
+        assert!(matches!(sent, NetCmd::FetchBody { uid: 3, .. }));
+        assert!(rx.try_recv().is_err());
+
+        let message = app.message.as_ref().expect("loading placeholder");
+        assert_eq!(message.subject, "three");
+        assert_eq!(message.body, "(loading…)");
+        assert!(app.pending_body.is_none());
+    }
+
+    #[test]
+    fn arrows_at_the_list_edges_do_not_schedule_a_download() {
+        let mut app = app();
+        app.pane = Pane::Messages;
+        app.emails = vec![summary(1, "one")];
+        app.email_state.select(Some(0));
+
+        app.move_selection(-1);
+        app.move_selection(1);
+
+        assert_eq!(app.email_index(), 0);
+        assert!(app.pending_body.is_none());
+        assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn moving_back_to_a_cached_message_is_instant() {
+        let mut app = app();
+        app.pane = Pane::Messages;
+        app.emails = vec![summary(1, "one"), summary(2, "two")];
+        app.email_state.select(Some(0));
+
+        app.on_net(NetMsg::Body {
+            mailbox: "INBOX".to_string(),
+            uid: 1,
+            body: body("one"),
+        });
+        assert_eq!(app.message.as_ref().unwrap().subject, "one");
+
+        // Down arms a fetch for the second row...
+        app.move_selection(1);
+        assert!(matches!(app.pending_body.as_ref(), Some(pending) if pending.uid == 2));
+
+        // ...but coming back is answered from the cache, with no deadline.
+        app.move_selection(-1);
+        assert!(app.pending_body.is_none());
+        assert_eq!(app.email_index(), 0);
+        assert_eq!(app.message.as_ref().unwrap().subject, "one");
+    }
+
+    #[test]
+    fn a_body_for_a_row_that_moved_on_is_cached_not_shown() {
+        let mut app = app();
+        app.pane = Pane::Messages;
+        app.emails = vec![summary(1, "one"), summary(2, "two")];
+        app.email_state.select(Some(1));
+        app.move_selection(-1);
+
+        // A reply for the row the user just left must not replace the reader.
+        app.on_net(NetMsg::Body {
+            mailbox: "INBOX".to_string(),
+            uid: 2,
+            body: body("two"),
+        });
+
+        assert!(app.message.is_none());
+        assert!(app.body_cache.get("INBOX", 2).is_some());
+        assert_eq!(app.pending_body.as_ref().map(|pending| pending.uid), Some(1));
+    }
+
+    #[test]
+    fn an_explicit_reload_bypasses_the_cache() {
+        let mut app = app();
+        app.pane = Pane::Messages;
+        app.emails = vec![summary(1, "one")];
+        app.email_state.select(Some(0));
+        app.on_net(NetMsg::Body {
+            mailbox: "INBOX".to_string(),
+            uid: 1,
+            body: body("one"),
+        });
+        assert_eq!(app.message.as_ref().unwrap().body, "hello");
+
+        app.reload_selected_message();
+        assert_eq!(app.message.as_ref().unwrap().body, "(loading…)");
+        assert!(app.pending_body.is_none());
     }
 }
